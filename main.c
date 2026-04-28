@@ -3574,31 +3574,71 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 						g_rc1_last_cmd_id = 0x064;
 						g_rc1_x_mov_raw = buf_rec[2];
 						g_rc1_y_mov_raw = buf_rec[5];
+						uint8_t id1_now = (uint8_t) HAL_GPIO_ReadPin(
+						IO_CFG_1_GPIO_Port, IO_CFG_1_Pin);
+						uint8_t id3_now = (uint8_t) HAL_GPIO_ReadPin(
+						IO_CFG_3_GPIO_Port, IO_CFG_3_Pin);
+						bool python_map_mode = (id1_now == 0U) && (id3_now == 0U);
 						int rx_x_mm = (int) ((buf_rec[1] << 8) + (buf_rec[0] << 0));
 						int rx_y_mm = (int) ((buf_rec[4] << 8) + (buf_rec[3] << 0));
 
-					TA531_RC1.TA531_RC_Reset = (buf_rec[7] >> 6) & 0x03;
-					// 以屏幕左上角(X0,Y0)作为逻辑0点：
-					// Python发(0,0) => 物理到(X0,Y0)，发(69,41) => 到(X0+69, Y0+41)
-					if ((TA531_RC1.TA531_RC_Reset == 1)
-							&& (rx_x_mm == 0)
-							&& (rx_y_mm == 0)) {
-						// Reset 命令保留绝对零点语义（回机械零）
-						TA531_RC1.TA531_RC_X_trg = 0;
-						TA531_RC1.TA531_RC_Y_trg = 0;
-					} else {
-						TA531_RC1.TA531_RC_X_trg = ScreenSz_1.DispX0_32b + rx_x_mm;
-						TA531_RC1.TA531_RC_Y_trg = ScreenSz_1.DispY0_32b + rx_y_mm;
-					}
+						TA531_RC1.TA531_RC_Reset = (buf_rec[7] >> 6) & 0x03;
+						// 以屏幕左上角(X0,Y0)作为逻辑0点：
+						// Python发(0,0) => 物理到(X0,Y0)，发(69,41) => 到(X0+69, Y0+41)
+						if ((TA531_RC1.TA531_RC_Reset == 1)
+								&& (rx_x_mm == 0)
+								&& (rx_y_mm == 0)) {
+							if (python_map_mode) {
+								// python 映射模式：0,0 对齐屏幕原点(X0,Y0)
+								TA531_RC1.TA531_RC_X_trg = ScreenSz_1.DispX0_32b;
+								TA531_RC1.TA531_RC_Y_trg = ScreenSz_1.DispY0_32b;
+							} else {
+								// 兼容旧语义：Reset 命令回机械零点
+								TA531_RC1.TA531_RC_X_trg = 0;
+								TA531_RC1.TA531_RC_Y_trg = 0;
+							}
+							} else {
+								if (python_map_mode) {
+									// python 映射模式：
+									// 1) 若输入在 0~1000，按归一化坐标映射到屏幕工作区 [X0..X1]/[Y0..Y1]
+									//    例如 500 => 中间位置
+									// 2) 否则按绝对目标坐标解释（兼容上位机已做过换算的场景）
+									if ((rx_x_mm >= 0) && (rx_x_mm <= 1000)
+											&& (rx_y_mm >= 0) && (rx_y_mm <= 1000)) {
+										TA531_RC1.TA531_RC_X_trg =
+												ScreenSz_1.DispX0_32b
+														+ (int) (rx_x_mm
+																* (ScreenSz_1.DispX1_32b
+																		- ScreenSz_1.DispX0_32b)
+																/ 1000);
+										TA531_RC1.TA531_RC_Y_trg =
+												ScreenSz_1.DispY0_32b
+														+ (int) (rx_y_mm
+																* (ScreenSz_1.DispY1_32b
+																		- ScreenSz_1.DispY0_32b)
+																/ 1000);
+									} else {
+										TA531_RC1.TA531_RC_X_trg = rx_x_mm;
+										TA531_RC1.TA531_RC_Y_trg = rx_y_mm;
+									}
+								} else {
+									// 兼容旧语义：0x064 按“相对屏幕原点(X0,Y0)”解释
+									TA531_RC1.TA531_RC_X_trg = ScreenSz_1.DispX0_32b
+											+ rx_x_mm;
+								TA531_RC1.TA531_RC_Y_trg = ScreenSz_1.DispY0_32b
+										+ rx_y_mm;
+							}
+						}
 						TA531_RC1.TA531_RC_X_Mov = (int8_t) buf_rec[2];
 						TA531_RC1.TA531_RC_Y_Mov = (int8_t) buf_rec[5];
 
-					TA531_RC1.TA531_RC_Z = (int) (buf_rec[6] << 0);
-					TA531_RC1.TA531_RC_Z_code = buf_rec[7] & 0x03;
+						TA531_RC1.TA531_RC_Z = (int) (buf_rec[6] << 0);
+						TA531_RC1.TA531_RC_Z_code = buf_rec[7] & 0x03;
 
-					Clamp_Position(&TA531_RC1.TA531_RC_X_trg,
-							&TA531_RC1.TA531_RC_Y_trg,
-							(TA531_RC1.TA531_RC_Reset == 1));
+						Clamp_Position(&TA531_RC1.TA531_RC_X_trg,
+								&TA531_RC1.TA531_RC_Y_trg,
+								(TA531_RC1.TA531_RC_Reset == 1)
+										&& (!python_map_mode));
 
 					TA531_RC1_fg = 2;
 					} else if (FDCAN1_RxHeader.Identifier == 0x065)	//TSA_RC1p %
@@ -3628,13 +3668,24 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 						if ((TA531_RC1.TA531_RC_Reset == 1)
 								&& (buf_rec[0] == 0)
 							&& (buf_rec[3] == 0)) {
-						// Reset 命令保留绝对零点语义（回机械零）
-						TA531_RC1.TA531_RC_X_trg = 0;
-						TA531_RC1.TA531_RC_Y_trg = 0;
+						uint8_t id1_now = (uint8_t) HAL_GPIO_ReadPin(
+						IO_CFG_1_GPIO_Port, IO_CFG_1_Pin);
+						uint8_t id3_now = (uint8_t) HAL_GPIO_ReadPin(
+						IO_CFG_3_GPIO_Port, IO_CFG_3_Pin);
+						bool python_map_mode = (id1_now == 0U) && (id3_now == 0U);
+						if (python_map_mode) {
+							// python 映射模式：0,0 对齐屏幕原点(X0,Y0)
+							TA531_RC1.TA531_RC_X_trg = ScreenSz_1.DispX0_32b;
+							TA531_RC1.TA531_RC_Y_trg = ScreenSz_1.DispY0_32b;
 						} else {
-							// 百分比命令以屏幕区域左上角(X0,Y0)作为逻辑0点
-							// id4=0 => 按 /100 映射；id4=1 => 兼容旧版 /255 映射
-							TA531_RC1.TA531_RC_X_trg = ScreenSz_1.DispX0_32b
+							// 兼容旧语义：Reset 命令回机械零点
+							TA531_RC1.TA531_RC_X_trg = 0;
+							TA531_RC1.TA531_RC_Y_trg = 0;
+						}
+						} else {
+								// 百分比命令以屏幕区域左上角(X0,Y0)作为逻辑0点
+								// id4=0 => 按 /100 映射；id4=1 => 兼容旧版 /255 映射
+								TA531_RC1.TA531_RC_X_trg = ScreenSz_1.DispX0_32b
 									+ (int) (x_pct_raw
 											* (ScreenSz_1.DispX1_32b
 													- ScreenSz_1.DispX0_32b) / scale_den);
@@ -3647,12 +3698,18 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 						TA531_RC1.TA531_RC_X_Mov = (int8_t) buf_rec[2];
 						TA531_RC1.TA531_RC_Y_Mov = (int8_t) buf_rec[5];
 
-					TA531_RC1.TA531_RC_Z = (int) (buf_rec[6] << 0);
-					TA531_RC1.TA531_RC_Z_code = buf_rec[7] & 0x03;
+						TA531_RC1.TA531_RC_Z = (int) (buf_rec[6] << 0);
+						TA531_RC1.TA531_RC_Z_code = buf_rec[7] & 0x03;
 
-					Clamp_Position(&TA531_RC1.TA531_RC_X_trg,
-							&TA531_RC1.TA531_RC_Y_trg,
-							(TA531_RC1.TA531_RC_Reset == 1));
+						uint8_t id1_now = (uint8_t) HAL_GPIO_ReadPin(
+						IO_CFG_1_GPIO_Port, IO_CFG_1_Pin);
+						uint8_t id3_now = (uint8_t) HAL_GPIO_ReadPin(
+						IO_CFG_3_GPIO_Port, IO_CFG_3_Pin);
+						bool python_map_mode = (id1_now == 0U) && (id3_now == 0U);
+						Clamp_Position(&TA531_RC1.TA531_RC_X_trg,
+								&TA531_RC1.TA531_RC_Y_trg,
+								(TA531_RC1.TA531_RC_Reset == 1)
+										&& (!python_map_mode));
 
 					TA531_RC1_fg = 2;
 				} else if (FDCAN1_RxHeader.Identifier == 0x531)	//TSA_ACK for RESET
